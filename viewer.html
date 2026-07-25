@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Visualizador 3D — Gestão de Pneus</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#1a1a2e;overflow:hidden;font-family:'Inter',sans-serif}
+  canvas{display:block;width:100vw;height:100vh}
+
+  /* Painel de status do pneu selecionado */
+  #info{
+    position:fixed;top:12px;left:12px;
+    background:rgba(10,10,30,0.88);
+    border:1px solid rgba(255,255,255,0.12);
+    border-radius:12px;padding:12px 16px;
+    color:#fff;font-size:12px;
+    min-width:180px;backdrop-filter:blur(8px);
+    display:none;
+  }
+  #info .pos{font-size:15px;font-weight:600;margin-bottom:6px;color:#90c4f9}
+  #info .row{display:flex;justify-content:space-between;gap:16px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.07)}
+  #info .row:last-child{border:none}
+  #info .lbl{color:rgba(255,255,255,0.5)}
+  #info .val{font-weight:500}
+  #info .badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:600;margin-top:6px}
+  #info .badge.ok  {background:#d1fae5;color:#065f46}
+  #info .badge.warn{background:#fef3c7;color:#78350f}
+  #info .badge.crit{background:#fee2e2;color:#7f1d1d}
+
+  /* Legenda */
+  #legend{
+    position:fixed;bottom:16px;left:12px;
+    background:rgba(10,10,30,0.78);
+    border:1px solid rgba(255,255,255,0.1);
+    border-radius:10px;padding:10px 14px;
+    color:#fff;font-size:11px;backdrop-filter:blur(8px);
+  }
+  #legend .leg-row{display:flex;align-items:center;gap:7px;margin:3px 0}
+  #legend .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+
+  /* Controles */
+  #controls{
+    position:fixed;bottom:16px;right:12px;
+    background:rgba(10,10,30,0.78);
+    border:1px solid rgba(255,255,255,0.1);
+    border-radius:10px;padding:10px 14px;
+    color:rgba(255,255,255,0.55);font-size:10px;
+    line-height:1.8;backdrop-filter:blur(8px);
+  }
+
+  /* Loading */
+  #loading{
+    position:fixed;inset:0;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    background:#1a1a2e;color:#90c4f9;font-size:14px;gap:12px;
+  }
+  .spinner{
+    width:36px;height:36px;border-radius:50%;
+    border:3px solid rgba(144,196,249,0.2);
+    border-top-color:#90c4f9;
+    animation:spin .8s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="loading">
+  <div class="spinner"></div>
+  <span>Carregando modelo 3D...</span>
+</div>
+
+<canvas id="c"></canvas>
+
+<div id="info"></div>
+
+<div id="legend">
+  <div class="leg-row"><div class="dot" style="background:#6ee7b7"></div>Normal</div>
+  <div class="leg-row"><div class="dot" style="background:#fcd34d"></div>Atenção</div>
+  <div class="leg-row"><div class="dot" style="background:#fca5a5"></div>Crítico</div>
+  <div class="leg-row"><div class="dot" style="background:#94a3b8"></div>Sem dados</div>
+</div>
+
+<div id="controls">
+  🖱 Arrastar — Girar<br>
+  🖱 Scroll — Zoom<br>
+  🖱 Direito — Mover<br>
+  🖱 Clicar no pneu — Detalhes
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ─── Configuração ──────────────────────────────────────────────────────────
+const GLB_FILE = 'caminhao.glb'; // mesmo nome do arquivo no repositório
+
+// Dados de status dos pneus — alimentados pelo Power BI via postMessage
+// ou definidos aqui como fallback para visualização standalone
+const TIRE_STATUS_DEFAULT = {
+  '1EI':{ psi:118, meta:115, desg:28, status:'ok',   label:'Normal'  },
+  '1DI':{ psi: 97, meta:115, desg:64, status:'warn', label:'Atenção' },
+  '2EE':{ psi:122, meta:120, desg:21, status:'ok',   label:'Normal'  },
+  '2EI':{ psi:119, meta:120, desg:18, status:'ok',   label:'Normal'  },
+  '2DI':{ psi:124, meta:120, desg:25, status:'ok',   label:'Normal'  },
+  '2DE':{ psi:116, meta:120, desg:31, status:'ok',   label:'Normal'  },
+  '3EE':{ psi: 98, meta:120, desg:85, status:'crit', label:'Crítico' },
+  '3EI':{ psi:120, meta:120, desg:41, status:'ok',   label:'Normal'  },
+  '3DI':{ psi:114, meta:120, desg:57, status:'warn', label:'Atenção' },
+  '3DE':{ psi: 89, meta:120, desg:93, status:'crit', label:'Crítico' },
+};
+
+const COR = {
+  ok:   new THREE.Color(0x6ee7b7),
+  warn: new THREE.Color(0xfcd34d),
+  crit: new THREE.Color(0xfca5a5),
+  none: new THREE.Color(0x94a3b8),
+  hover:new THREE.Color(0x90c4f9),
+};
+
+let tireData = { ...TIRE_STATUS_DEFAULT };
+let tireObjects = {};   // nome → mesh
+let hoveredObj = null;
+let selectedName = null;
+
+// ─── Setup Three.js ────────────────────────────────────────────────────────
+const canvas   = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, alpha:true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+scene.fog = new THREE.FogExp2(0x1a1a2e, 0.035);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 200);
+camera.position.set(6, 4, 10);
+
+// ─── Iluminação ────────────────────────────────────────────────────────────
+const ambient = new THREE.AmbientLight(0xffffff, 0.5);
+scene.add(ambient);
+
+const sun = new THREE.DirectionalLight(0xfff4e0, 1.2);
+sun.position.set(8, 12, 6);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+scene.add(sun);
+
+const fill = new THREE.DirectionalLight(0x90c4f9, 0.4);
+fill.position.set(-6, 4, -4);
+scene.add(fill);
+
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(60, 60),
+  new THREE.MeshStandardMaterial({ color:0x111122, roughness:0.9, metalness:0.1 })
+);
+ground.rotation.x = -Math.PI/2;
+ground.position.y = -0.01;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Grid sutil no chão
+const grid = new THREE.GridHelper(40, 40, 0x222244, 0x1a1a35);
+grid.position.y = 0.01;
+scene.add(grid);
+
+// ─── OrbitControls (manual leve) ──────────────────────────────────────────
+let isDragging = false, isRightDrag = false;
+let prevMouse = {x:0, y:0};
+let spherical = { theta: -0.5, phi: 0.9, radius: 14 };
+let target = new THREE.Vector3(0, 1, 0);
+
+function updateCamera(){
+  const x = target.x + spherical.radius * Math.sin(spherical.phi) * Math.sin(spherical.theta);
+  const y = target.y + spherical.radius * Math.cos(spherical.phi);
+  const z = target.z + spherical.radius * Math.sin(spherical.phi) * Math.cos(spherical.theta);
+  camera.position.set(x, y, z);
+  camera.lookAt(target);
+}
+updateCamera();
+
+canvas.addEventListener('mousedown', e => {
+  isDragging = true;
+  isRightDrag = e.button === 2;
+  prevMouse = { x: e.clientX, y: e.clientY };
+});
+window.addEventListener('mouseup', () => isDragging = false);
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+window.addEventListener('mousemove', e => {
+  if(!isDragging) return;
+  const dx = e.clientX - prevMouse.x;
+  const dy = e.clientY - prevMouse.y;
+  if(isRightDrag){
+    const pan = 0.008 * spherical.radius;
+    const right = new THREE.Vector3();
+    const up    = new THREE.Vector3(0,1,0);
+    right.crossVectors(up, new THREE.Vector3().subVectors(camera.position, target).normalize()).normalize();
+    target.addScaledVector(right,  dx * pan);
+    target.addScaledVector(up,    -dy * pan);
+  } else {
+    spherical.theta -= dx * 0.008;
+    spherical.phi    = Math.max(0.1, Math.min(Math.PI-0.1, spherical.phi - dy*0.008));
+  }
+  updateCamera();
+  prevMouse = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener('wheel', e => {
+  spherical.radius = Math.max(2, Math.min(40, spherical.radius + e.deltaY * 0.02));
+  updateCamera();
+}, {passive:true});
+
+// ─── Raycasting ───────────────────────────────────────────────────────────
+const raycaster = new THREE.Raycaster();
+const mouse2D   = new THREE.Vector2();
+
+function getMouseNDC(e){
+  const rect = canvas.getBoundingClientRect();
+  return new THREE.Vector2(
+    ((e.clientX - rect.left) / rect.width)  *  2 - 1,
+    ((e.clientY - rect.top)  / rect.height) * -2 + 1
+  );
+}
+
+window.addEventListener('mousemove', e => {
+  if(isDragging) return;
+  const ndc = getMouseNDC(e);
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(Object.values(tireObjects), true);
+  const newHover = hits.length ? findTireParent(hits[0].object) : null;
+  if(newHover !== hoveredObj){
+    hoveredObj = newHover;
+    applyColors();
+    canvas.style.cursor = hoveredObj ? 'pointer' : 'default';
+  }
+});
+
+canvas.addEventListener('click', e => {
+  const ndc = getMouseNDC(e);
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(Object.values(tireObjects), true);
+  if(hits.length){
+    const obj = findTireParent(hits[0].object);
+    if(obj){
+      selectedName = obj.userData.posicao;
+      showInfo(selectedName);
+      // Envia ao Power BI
+      window.parent.postMessage({ type:'TIRE_CLICK', posicao: selectedName }, '*');
+    }
+  } else {
+    selectedName = null;
+    document.getElementById('info').style.display='none';
+  }
+  applyColors();
+});
+
+function findTireParent(obj){
+  let cur = obj;
+  while(cur){
+    if(cur.userData && cur.userData.posicao) return cur;
+    if(cur.isMesh && cur.name && tireObjects[cur.name]) return cur;
+    cur = cur.parent;
+  }
+  return null;
+}
+
+// ─── Coloração por status ─────────────────────────────────────────────────
+function getTireColor(name){
+  const d = tireData[name];
+  if(!d) return COR.none;
+  if(name === selectedName) return COR.hover;
+  if(hoveredObj && hoveredObj.userData.posicao === name) return COR.hover;
+  return COR[d.status] || COR.none;
+}
+
+function applyColors(){
+  Object.entries(tireObjects).forEach(([name, obj])=>{
+    const col = getTireColor(name);
+    obj.traverse(child=>{
+      if(child.isMesh && child.material){
+        if(!child.userData.origColor) child.userData.origColor = child.material.color.clone();
+        child.material.color.copy(col);
+        child.material.emissive = col.clone().multiplyScalar(0.15);
+        child.material.needsUpdate = true;
+      }
+    });
+  });
+}
+
+// ─── Info panel ────────────────────────────────────────────────────────────
+function showInfo(name){
+  const d = tireData[name];
+  const el = document.getElementById('info');
+  if(!d){ el.style.display='none'; return; }
+  el.style.display='block';
+  el.innerHTML = `
+    <div class="pos">Posição: ${name}</div>
+    <div class="row"><span class="lbl">PSI atual</span><span class="val">${d.psi}</span></div>
+    <div class="row"><span class="lbl">PSI meta</span><span class="val">${d.meta}</span></div>
+    <div class="row"><span class="lbl">Desgaste</span><span class="val">${d.desg}%</span></div>
+    <div class="badge ${d.status}">${d.label}</div>
+  `;
+}
+
+// ─── Carrega GLB ──────────────────────────────────────────────────────────
+// GLTFLoader inline (r128 compatível com Three r128 do CDN)
+(function(){
+  const script = document.createElement('script');
+  script.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/examples/js/loaders/GLTFLoader.js';
+  script.onerror = () => loadFallback(); // fallback se CDN falhar
+  script.onload  = () => loadGLB();
+  document.head.appendChild(script);
+})();
+
+function loadGLB(){
+  const loader = new THREE.GLTFLoader();
+  loader.load(
+    GLB_FILE,
+    gltf => {
+      const model = gltf.scene;
+
+      // Centraliza modelo
+      const box = new THREE.Box3().setFromObject(model);
+      const center = box.getCenter(new THREE.Vector3());
+      const size   = box.getSize(new THREE.Vector3());
+      model.position.sub(center);
+      model.position.y += size.y / 2;
+
+      // Escala para caber na cena
+      const maxDim = Math.max(size.x, size.y, size.z);
+      if(maxDim > 10) model.scale.setScalar(8 / maxDim);
+
+      model.traverse(obj => {
+        if(obj.isMesh){
+          obj.castShadow = true;
+          obj.receiveShadow = true;
+          // Mapeia pneus pelo nome (suporta variações: "1EI", "pneu_1EI", "Tire_1EI", etc.)
+          const POSICOES = ['1EI','1DI','2EE','2EI','2DI','2DE','3EE','3EI','3DI','3DE'];
+          const pos = POSICOES.find(p => obj.name === p || obj.name.includes(p));
+          if(pos){
+            obj.userData.posicao = pos;
+            tireObjects[pos] = obj;
+          }
+        }
+      });
+
+      scene.add(model);
+      applyColors();
+      document.getElementById('loading').style.display = 'none';
+    },
+    xhr => {
+      const pct = Math.round(xhr.loaded / xhr.total * 100);
+      document.querySelector('#loading span').textContent = `Carregando modelo 3D... ${pct}%`;
+    },
+    err => {
+      console.warn('GLB não encontrado, usando fallback geométrico:', err);
+      loadFallback();
+    }
+  );
+}
+
+// ─── Fallback geométrico (preview sem .glb) ────────────────────────────────
+function loadFallback(){
+  document.querySelector('#loading span').textContent = 'Carregando preview...';
+
+  // Chassi simples
+  const mat_body = new THREE.MeshStandardMaterial({color:0x888899,roughness:0.6,metalness:0.4});
+  const chassi = new THREE.Mesh(new THREE.BoxGeometry(1.6,0.3,5.5), mat_body);
+  chassi.position.set(0,0.8,0); chassi.castShadow=true; scene.add(chassi);
+
+  const cab = new THREE.Mesh(new THREE.BoxGeometry(1.6,1.2,1.6), mat_body);
+  cab.position.set(0,1.65,2); cab.castShadow=true; scene.add(cab);
+
+  // Pneus posicionados: [nome, x, z]
+  const TIRE_LAYOUT = [
+    ['1EI', -0.95,  2.0], ['1DI',  0.95,  2.0],
+    ['2EE', -1.15,  0.0], ['2EI', -0.75,  0.0],
+    ['2DI',  0.75,  0.0], ['2DE',  1.15,  0.0],
+    ['3EE', -1.15, -2.0], ['3EI', -0.75, -2.0],
+    ['3DI',  0.75, -2.0], ['3DE',  1.15, -2.0],
+  ];
+
+  TIRE_LAYOUT.forEach(([pos, x, z]) => {
+    const mat = new THREE.MeshStandardMaterial({roughness:0.8,metalness:0.1});
+    const tire = new THREE.Mesh(new THREE.CylinderGeometry(0.38,0.38,0.25,20), mat);
+    tire.rotation.z = Math.PI/2;
+    tire.position.set(x, 0.38, z);
+    tire.castShadow = true;
+    tire.userData.posicao = pos;
+    tireObjects[pos] = tire;
+    scene.add(tire);
+  });
+
+  applyColors();
+  document.getElementById('loading').style.display='none';
+}
+
+// ─── Recebe dados do Power BI ──────────────────────────────────────────────
+window.addEventListener('message', e => {
+  if(e.data && e.data.type === 'TIRE_DATA'){
+    tireData = e.data.data;
+    applyColors();
+  }
+});
+
+// ─── Resize ───────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ─── Loop de renderização ─────────────────────────────────────────────────
+function animate(){
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
