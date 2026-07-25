@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Visualizador 3D — Gestão de Pneus</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a2e;overflow:hidden;font-family:Arial,sans-serif}
+canvas{display:block;width:100vw;height:100vh}
+#info{position:fixed;top:12px;left:12px;background:rgba(10,10,30,0.88);border:1px solid rgba(255,255,255,0.12);border-radius:12px;padding:12px 16px;color:#fff;font-size:12px;min-width:180px;display:none}
+#info .pos{font-size:15px;font-weight:600;margin-bottom:6px;color:#90c4f9}
+#info .row{display:flex;justify-content:space-between;gap:16px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.07)}
+#info .row:last-child{border:none}
+#info .lbl{color:rgba(255,255,255,0.5)}
+#info .badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:600;margin-top:6px}
+#info .badge.ok{background:#d1fae5;color:#065f46}
+#info .badge.warn{background:#fef3c7;color:#78350f}
+#info .badge.crit{background:#fee2e2;color:#7f1d1d}
+#legend{position:fixed;bottom:16px;left:12px;background:rgba(10,10,30,0.78);border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:10px 14px;color:#fff;font-size:11px}
+#legend .lr{display:flex;align-items:center;gap:7px;margin:3px 0}
+#legend .dot{width:10px;height:10px;border-radius:50%}
+#controls{position:fixed;bottom:16px;right:12px;background:rgba(10,10,30,0.78);border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:10px 14px;color:rgba(255,255,255,0.55);font-size:10px;line-height:1.8}
+#loading{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#1a1a2e;color:#90c4f9;font-size:14px;gap:12px}
+.spin{width:36px;height:36px;border-radius:50%;border:3px solid rgba(144,196,249,0.2);border-top-color:#90c4f9;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="loading"><div class="spin"></div><span id="loadtxt">Carregando modelo 3D...</span></div>
+<canvas id="c"></canvas>
+<div id="info"></div>
+<div id="legend">
+  <div class="lr"><div class="dot" style="background:#6ee7b7"></div>Normal</div>
+  <div class="lr"><div class="dot" style="background:#fcd34d"></div>Atenção</div>
+  <div class="lr"><div class="dot" style="background:#fca5a5"></div>Crítico</div>
+  <div class="lr"><div class="dot" style="background:#94a3b8"></div>Sem dados</div>
+</div>
+<div id="controls">🖱 Arrastar — Girar<br>🖱 Scroll — Zoom<br>🖱 Direito — Mover<br>🖱 Clicar no pneu — Detalhes</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+
+const GLB_FILE = 'caminhao_3_eixos-v1.glb';
+
+const TIRE_STATUS = {
+  '1EI':{ psi:118, meta:115, desg:28, status:'ok',   label:'Normal'  },
+  '1DI':{ psi: 97, meta:115, desg:64, status:'warn', label:'Atenção' },
+  '2EE':{ psi:122, meta:120, desg:21, status:'ok',   label:'Normal'  },
+  '2EI':{ psi:119, meta:120, desg:18, status:'ok',   label:'Normal'  },
+  '2DI':{ psi:124, meta:120, desg:25, status:'ok',   label:'Normal'  },
+  '2DE':{ psi:116, meta:120, desg:31, status:'ok',   label:'Normal'  },
+  '3EE':{ psi: 98, meta:120, desg:85, status:'crit', label:'Crítico' },
+  '3EI':{ psi:120, meta:120, desg:41, status:'ok',   label:'Normal'  },
+  '3DI':{ psi:114, meta:120, desg:57, status:'warn', label:'Atenção' },
+  '3DE':{ psi: 89, meta:120, desg:93, status:'crit', label:'Crítico' },
+};
+
+const COR = {
+  ok:   new THREE.Color(0x6ee7b7),
+  warn: new THREE.Color(0xfcd34d),
+  crit: new THREE.Color(0xfca5a5),
+  none: new THREE.Color(0x94a3b8),
+};
+
+let tireObjects = {};
+let selectedName = null;
+let hoveredObj = null;
+
+// ── Renderer ──────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+
+// ── Scene ─────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+scene.fog = new THREE.FogExp2(0x1a1a2e, 0.025);
+
+// ── Camera ────────────────────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 500);
+camera.position.set(8, 5, 12);
+
+// ── Controls ──────────────────────────────────────────────────────
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 2;
+controls.maxDistance = 60;
+controls.maxPolarAngle = Math.PI / 2;
+
+// ── Lights ────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const sun = new THREE.DirectionalLight(0xfff4e0, 1.4);
+sun.position.set(10, 15, 8);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 0.5;
+sun.shadow.camera.far = 100;
+sun.shadow.camera.left = -20;
+sun.shadow.camera.right = 20;
+sun.shadow.camera.top = 20;
+sun.shadow.camera.bottom = -20;
+scene.add(sun);
+scene.add(new THREE.DirectionalLight(0x90c4f9, 0.3).position.set(-8, 4, -6));
+
+// Chão
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(200, 200),
+  new THREE.MeshStandardMaterial({ color: 0x111122, roughness: 0.9 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+const grid = new THREE.GridHelper(100, 60, 0x222244, 0x1a1a35);
+grid.position.y = 0.02;
+scene.add(grid);
+
+// ── Cores nos pneus ───────────────────────────────────────────────
+function applyColors() {
+  const POSICOES = Object.keys(TIRE_STATUS);
+  Object.entries(tireObjects).forEach(([name, obj]) => {
+    const pos = POSICOES.find(p => name === p || name.includes(p));
+    const d = pos ? TIRE_STATUS[pos] : null;
+    let col = d ? COR[d.status] : COR.none;
+    if (name === selectedName) col = new THREE.Color(0x90c4f9);
+    obj.traverse(child => {
+      if (child.isMesh && child.material) {
+        child.material = child.material.clone();
+        child.material.color.copy(col);
+        child.material.emissive = col.clone().multiplyScalar(0.12);
+        child.material.needsUpdate = true;
+      }
+    });
+  });
+}
+
+// ── Info panel ────────────────────────────────────────────────────
+function showInfo(name) {
+  const POSICOES = Object.keys(TIRE_STATUS);
+  const pos = POSICOES.find(p => name === p || name.includes(p));
+  const d = pos ? TIRE_STATUS[pos] : null;
+  const el = document.getElementById('info');
+  if (!d) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div class="pos">Posição: ${pos}</div>
+    <div class="row"><span class="lbl">PSI atual</span><span>${d.psi}</span></div>
+    <div class="row"><span class="lbl">PSI meta</span><span>${d.meta}</span></div>
+    <div class="row"><span class="lbl">Desgaste</span><span>${d.desg}%</span></div>
+    <div class="badge ${d.status}">${d.label}</div>`;
+}
+
+// ── Raycasting ────────────────────────────────────────────────────
+const raycaster = new THREE.Raycaster();
+
+canvas.addEventListener('click', e => {
+  const rect = canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((e.clientX - rect.left) / rect.width) * 2 - 1,
+    -((e.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  raycaster.setFromCamera(ndc, camera);
+  const allMeshes = [];
+  Object.values(tireObjects).forEach(o => o.traverse(c => { if (c.isMesh) allMeshes.push(c); }));
+  const hits = raycaster.intersectObjects(allMeshes, false);
+  if (hits.length) {
+    let cur = hits[0].object;
+    while (cur && !tireObjects[cur.name]) cur = cur.parent;
+    if (cur) {
+      selectedName = cur.name;
+      showInfo(cur.name);
+      applyColors();
+      window.parent.postMessage({ type: 'TIRE_CLICK', posicao: cur.name }, '*');
+    }
+  } else {
+    selectedName = null;
+    document.getElementById('info').style.display = 'none';
+    applyColors();
+  }
+});
+
+// ── Carrega GLB ───────────────────────────────────────────────────
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath('https://unpkg.com/three@0.160.0/examples/jsm/libs/draco/');
+
+const loader = new GLTFLoader();
+loader.setDRACOLoader(dracoLoader);
+
+loader.load(
+  GLB_FILE,
+  gltf => {
+    const model = gltf.scene;
+
+    // Centraliza e escala
+    const box = new THREE.Box3().setFromObject(model);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    model.position.sub(center);
+    model.position.y += size.y / 2;
+    const maxDim = Math.max(size.x, size.y, size.z);
+    if (maxDim > 12) model.scale.setScalar(10 / maxDim);
+
+    // Mapeia pneus pelo nome
+    const POSICOES = ['1EI','1DI','2EE','2EI','2DI','2DE','3EE','3EI','3DI','3DE'];
+    model.traverse(obj => {
+      if (obj.isObject3D) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+        const pos = POSICOES.find(p => obj.name === p || obj.name.toUpperCase().includes(p));
+        if (pos) {
+          tireObjects[obj.name] = obj;
+          console.log('Pneu mapeado:', obj.name, '→', pos);
+        }
+      }
+    });
+
+    scene.add(model);
+    controls.target.set(0, size.y / 4, 0);
+    controls.update();
+    applyColors();
+    document.getElementById('loading').style.display = 'none';
+    console.log('Modelo carregado! Pneus mapeados:', Object.keys(tireObjects));
+  },
+  xhr => {
+    const pct = xhr.total ? Math.round(xhr.loaded / xhr.total * 100) : '...';
+    document.getElementById('loadtxt').textContent = `Carregando modelo 3D... ${pct}%`;
+  },
+  err => {
+    console.error('Erro ao carregar GLB:', err);
+    document.getElementById('loadtxt').textContent = 'Erro ao carregar modelo — verifique o console';
+  }
+);
+
+// ── Recebe dados do Power BI ───────────────────────────────────────
+window.addEventListener('message', e => {
+  if (e.data && e.data.type === 'TIRE_DATA') {
+    Object.assign(TIRE_STATUS, e.data.data);
+    applyColors();
+  }
+});
+
+// ── Resize ────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ── Loop ──────────────────────────────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
