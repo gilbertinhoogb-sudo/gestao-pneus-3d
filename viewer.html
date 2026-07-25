@@ -96,15 +96,15 @@ scene.fog = new THREE.FogExp2(0x1a1a2e, 0.025);
 
 // ── Camera ────────────────────────────────────────────────────────
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 500);
-camera.position.set(8, 5, 12);
+camera.position.set(4, 2.5, 6);
 
 // ── Controls ──────────────────────────────────────────────────────
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
-controls.minDistance = 2;
+controls.minDistance = 1;
 controls.maxDistance = 60;
-controls.maxPolarAngle = Math.PI / 2;
+controls.maxPolarAngle = Math.PI / 1.8;
 
 // ── Lights ────────────────────────────────────────────────────────
 scene.add(new THREE.AmbientLight(0xffffff, 0.6));
