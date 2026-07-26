@@ -54,7 +54,6 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 
 const GLB_FILE = 'caminhao_3_eixos-v1.glb';
 
-// Dados iniciais vazios — serão preenchidos pelo Power BI via postMessage
 let TIRE_STATUS = {
   '1EI':{ psi:0, meta:0, desg:0, status:'none', label:'Sem dados' },
   '1DI':{ psi:0, meta:0, desg:0, status:'none', label:'Sem dados' },
@@ -67,7 +66,24 @@ let TIRE_STATUS = {
   '3DI':{ psi:0, meta:0, desg:0, status:'none', label:'Sem dados' },
   '3DE':{ psi:0, meta:0, desg:0, status:'none', label:'Sem dados' },
 };
-
+function parseURL() {
+  const params = new URLSearchParams(window.location.search);
+  const d = params.get('d');
+  if (!d) return;
+  d.split('|').forEach(item => {
+    const parts = item.split(':');
+    if (parts.length >= 5) {
+      const pos = parts[0];
+      TIRE_STATUS[pos] = {
+        status: parts[1],
+        psi:    parseFloat(parts[2]),
+        meta:   parseFloat(parts[3]),
+        desg:   parseFloat(parts[4]),
+        label:  parts[1]==='crit'?'Crítico':parts[1]==='warn'?'Atenção':'Normal'
+      };
+    }
+  });
+}
 const COR = {
   ok:   new THREE.Color(0x6ee7b7),
   warn: new THREE.Color(0xfcd34d),
@@ -237,6 +253,7 @@ loader.load(
     controls.target.set(0, size.y / 3, 0);
     controls.update();
     applyColors();
+    parseURL();
     document.getElementById('loading').style.display = 'none';
     console.log('Modelo carregado! Pneus mapeados:', Object.keys(tireObjects));
   },
